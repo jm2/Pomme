@@ -9,6 +9,7 @@
 #include <iostream>
 #include <sstream>
 #include "CompilerSupport/filesystem.h"
+#include <SDL3/SDL_filesystem.h>
 
 #if _WIN32
 	#include "Platform/Windows/PommeWindows.h"
@@ -182,6 +183,13 @@ OSErr FindFolder(short vRefNum, OSType folderType, Boolean createFolder, short* 
 			return fnfErr;
 		}
 		path = fs::path(home) / "Library" / "Preferences";
+#elif defined(__ANDROID__)
+		char *prefPath = SDL_GetPrefPath("Pangea Software", "CroMagRally");
+		if (prefPath)
+		{
+			path = fs::path(prefPath);
+			SDL_free(prefPath);
+		}
 #else
 		const char* home = getenv("XDG_CONFIG_HOME");
 		if (home)
