@@ -14,6 +14,10 @@
 	#include "Platform/Windows/PommeWindows.h"
 #endif
 
+#ifdef __ANDROID__
+#include <SDL3/SDL.h>
+#endif
+
 using namespace Pomme;
 using namespace Pomme::Files;
 
@@ -175,6 +179,13 @@ OSErr FindFolder(short vRefNum, OSType folderType, Boolean createFolder, short* 
 	{
 #ifdef _WIN32
 		path = Pomme::Platform::Windows::GetPreferencesFolder();
+#elif defined(__ANDROID__)
+		char *prefPath = SDL_GetPrefPath("io.jor", "cromagrally");
+		if (prefPath)
+		{
+			path = fs::path(prefPath);
+			SDL_free(prefPath);
+		}
 #elif defined(__APPLE__)
 		const char *home = getenv("HOME");
 		if (!home)
