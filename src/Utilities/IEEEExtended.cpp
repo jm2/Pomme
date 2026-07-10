@@ -1,126 +1,200 @@
-/* Copyright (C) 1988-1991 Apple Computer, Inc.
- * All rights reserved.
- *
- * Machine-independent I/O routines for IEEE floating-point numbers.
- *
- * NaN's and infinities are converted to HUGE_VAL or HUGE, which
- * happens to be infinity on IEEE machines.  Unfortunately, it is
- * impossible to preserve NaN's in a machine-independent way.
- * Infinities are, however, preserved on IEEE machines.
- *
- * These routines have been tested on the following machines:
- *    Apple Macintosh, MPW 3.1 C compiler
- *    Apple Macintosh, THINK C compiler
- *    Silicon Graphics IRIS, MIPS compiler
- *    Cray X/MP and Y/MP
- *    Digital Equipment VAX
- *
- *
- * Implemented by Malcolm Slaney and Ken Turkowski.
- *
- * Malcolm Slaney contributions during 1988-1990 include big- and little-
- * endian file I/O, conversion to and from Motorola's extended 80-bit
- * floating-point format, and conversions to and from IEEE single-
- * precision floating-point format.
- *
- * In 1991, Ken Turkowski implemented the conversions to and from
- * IEEE double-precision format, added more precision to the extended
- * conversions, and accommodated conversions involving +/- infinity,
- * NaN's, and denormalized numbers.
- */
-
-#include <math.h>
 #include "IEEEExtended.h"
 
-#ifndef HUGE_VAL
-# define HUGE_VAL HUGE
-#endif
+#include <bit>
+#include <cstdint>
+#include <limits>
 
-#define FloatToUnsigned(f)      ((unsigned long)(((long)(f - 2147483648.0)) + 2147483647L) + 1)
-#define UnsignedToFloat(u)         (((double)((long)(u - 2147483647L - 1))) + 2147483648.0)
+namespace
+{
+static_assert(sizeof(double) == sizeof(std::uint64_t)
+		&& std::numeric_limits<double>::is_iec559
+		&& std::numeric_limits<double>::digits == 53
+		&& std::numeric_limits<double>::max_exponent == 1024,
+		"IEEE extended conversion requires an IEEE 754 binary64 double");
+
+constexpr std::uint16_t kExtendedExponentMask = 0x7fff;
+constexpr int kExtendedExponentBias = 16383;
+constexpr std::uint64_t kExtendedIntegerBit = UINT64_C(1) << 63;
+constexpr std::uint64_t kExtendedCanonicalNaN =
+		kExtendedIntegerBit | (UINT64_C(1) << 62);
+
+constexpr std::uint64_t kDoubleSignMask = UINT64_C(1) << 63;
+constexpr std::uint64_t kDoubleExponentMask = UINT64_C(0x7ff) << 52;
+constexpr std::uint64_t kDoubleFractionMask = (UINT64_C(1) << 52) - 1;
+constexpr std::uint64_t kDoubleInfinity = kDoubleExponentMask;
+constexpr std::uint64_t kDoubleCanonicalNaN =
+		kDoubleExponentMask | (UINT64_C(1) << 51);
+
+void StoreBigEndian(std::uint16_t signAndExponent, std::uint64_t significand, char* bytes)
+{
+	bytes[0] = static_cast<char>(signAndExponent >> 8);
+	bytes[1] = static_cast<char>(signAndExponent);
+	for (int i = 0; i < 8; i++)
+	{
+		bytes[2 + i] = static_cast<char>(significand >> (56 - 8 * i));
+	}
+}
+
+std::uint64_t LoadBigEndianSignificand(const unsigned char* bytes)
+{
+	std::uint64_t significand = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		significand = (significand << 8) | bytes[2 + i];
+	}
+	return significand;
+}
+
+int HighestSetBit(std::uint64_t value)
+{
+	return 63 - static_cast<int>(std::countl_zero(value));
+}
+
+// Divide by 2^shift, rounding to nearest with ties resolved toward an even
+// result. Shifts beyond the source width are handled explicitly so callers can
+// use this for binary80 values far below the binary64 range.
+std::uint64_t RoundedRightShift(std::uint64_t value, int shift)
+{
+	if (shift <= 0)
+	{
+		return value;
+	}
+	if (shift > 64)
+	{
+		return 0;
+	}
+	if (shift == 64)
+	{
+		const std::uint64_t halfway = UINT64_C(1) << 63;
+		return value > halfway ? 1 : 0;
+	}
+
+	const std::uint64_t quotient = value >> shift;
+	const std::uint64_t remainderMask = (UINT64_C(1) << shift) - 1;
+	const std::uint64_t remainder = value & remainderMask;
+	const std::uint64_t halfway = UINT64_C(1) << (shift - 1);
+	const bool roundUp = remainder > halfway
+			|| (remainder == halfway && (quotient & 1) != 0);
+	return quotient + static_cast<std::uint64_t>(roundUp);
+}
+
+std::uint64_t ScaleToInteger(std::uint64_t value, int binaryScale)
+{
+	if (binaryScale >= 0)
+	{
+		return value << binaryScale;
+	}
+	return RoundedRightShift(value, -binaryScale);
+}
+}  // namespace
 
 void ConvertToIeeeExtended(double num, char* bytes)
 {
-    int    sign;
-    int expon;
-    double fMant, fsMant;
-    unsigned long hiMant, loMant;
+	const std::uint64_t bits = std::bit_cast<std::uint64_t>(num);
+	const std::uint16_t sign = (bits & kDoubleSignMask) != 0 ? 0x8000 : 0;
+	const std::uint16_t exponent =
+			static_cast<std::uint16_t>((bits & kDoubleExponentMask) >> 52);
+	const std::uint64_t fraction = bits & kDoubleFractionMask;
 
-    if (num < 0) {
-        sign = 0x8000;
-        num *= -1;
-    } else {
-        sign = 0;
-    }
+	std::uint16_t extendedExponent = 0;
+	std::uint64_t extendedSignificand = 0;
 
-    if (num == 0) {
-        expon = 0; hiMant = 0; loMant = 0;
-    }
-    else {
-        fMant = frexp(num, &expon);
-        if ((expon > 16384) || !(fMant < 1)) {    /* Infinity or NaN */
-            expon = sign|0x7FFF; hiMant = 0; loMant = 0; /* infinity */
-        }
-        else {    /* Finite */
-            expon += 16382;
-            if (expon < 0) {    /* denormalized */
-                fMant = ldexp(fMant, expon);
-                expon = 0;
-            }
-            expon |= sign;
-            fMant = ldexp(fMant, 32);          
-            fsMant = floor(fMant); 
-            hiMant = FloatToUnsigned(fsMant);
-            fMant = ldexp(fMant - fsMant, 32); 
-            fsMant = floor(fMant); 
-            loMant = FloatToUnsigned(fsMant);
-        }
-    }
-    
-    bytes[0] = char(expon >> 8);
-    bytes[1] = char(expon);
-    bytes[2] = char(hiMant >> 24);
-    bytes[3] = char(hiMant >> 16);
-    bytes[4] = char(hiMant >> 8);
-    bytes[5] = char(hiMant);
-    bytes[6] = char(loMant >> 24);
-    bytes[7] = char(loMant >> 16);
-    bytes[8] = char(loMant >> 8);
-    bytes[9] = char(loMant);
+	if (exponent == 0x7ff)
+	{
+		extendedExponent = kExtendedExponentMask;
+		extendedSignificand = fraction == 0
+				? kExtendedIntegerBit
+				: kExtendedCanonicalNaN;
+	}
+	else if (exponent != 0)
+	{
+		extendedExponent = static_cast<std::uint16_t>(
+				exponent - 1023 + kExtendedExponentBias);
+		extendedSignificand = ((UINT64_C(1) << 52) | fraction) << 11;
+	}
+	else if (fraction != 0)
+	{
+		// A binary64 subnormal is still a normal binary80 value. Normalize the
+		// integer significand and adjust the exponent to match its leading bit.
+		const int leadingBit = HighestSetBit(fraction);
+		const int unbiasedExponent = leadingBit - 1074;
+		extendedExponent = static_cast<std::uint16_t>(
+				unbiasedExponent + kExtendedExponentBias);
+		extendedSignificand = fraction << (63 - leadingBit);
+	}
+
+	StoreBigEndian(static_cast<std::uint16_t>(sign | extendedExponent),
+			extendedSignificand, bytes);
 }
 
-double ConvertFromIeeeExtended(const unsigned char* bytes /* LCN */)
+double ConvertFromIeeeExtended(const unsigned char* bytes)
 {
-    double    f;
-    int    expon;
-    unsigned long hiMant, loMant;
-    
-    expon = ((bytes[0] & 0x7F) << 8) | (bytes[1] & 0xFF);
-    hiMant    =    ((unsigned long)(bytes[2] & 0xFF) << 24)
-            |    ((unsigned long)(bytes[3] & 0xFF) << 16)
-            |    ((unsigned long)(bytes[4] & 0xFF) << 8)
-            |    ((unsigned long)(bytes[5] & 0xFF));
-    loMant    =    ((unsigned long)(bytes[6] & 0xFF) << 24)
-            |    ((unsigned long)(bytes[7] & 0xFF) << 16)
-            |    ((unsigned long)(bytes[8] & 0xFF) << 8)
-            |    ((unsigned long)(bytes[9] & 0xFF));
+	const std::uint16_t signAndExponent =
+			static_cast<std::uint16_t>((bytes[0] << 8) | bytes[1]);
+	const bool negative = (signAndExponent & 0x8000) != 0;
+	const std::uint16_t exponent = signAndExponent & kExtendedExponentMask;
+	const std::uint64_t significand = LoadBigEndianSignificand(bytes);
+	const std::uint64_t doubleSign = negative ? kDoubleSignMask : 0;
 
-    if (expon == 0 && hiMant == 0 && loMant == 0) {
-        f = 0;
-    }
-    else {
-        if (expon == 0x7FFF) {    /* Infinity or NaN */
-            f = HUGE_VAL;
-        }
-        else {
-            expon -= 16383;
-            f  = ldexp(UnsignedToFloat(hiMant), expon-=31);
-            f += ldexp(UnsignedToFloat(loMant), expon-=32);
-        }
-    }
+	if (exponent == kExtendedExponentMask)
+	{
+		const std::uint64_t magnitude = significand == kExtendedIntegerBit
+				? kDoubleInfinity
+				: kDoubleCanonicalNaN;
+		return std::bit_cast<double>(doubleSign | magnitude);
+	}
+	if (significand == 0)
+	{
+		return std::bit_cast<double>(doubleSign);
+	}
 
-    if (bytes[0] & 0x80)
-        return -f;
-    else
-        return f;
+	// The explicit binary80 significand represents
+	//     significand * 2^(unbiasedExponent - 63).
+	// Normalizing from that expression also gives deterministic behavior for
+	// non-canonical encodings whose explicit integer bit is clear.
+	const int unbiasedExponent = exponent == 0
+			? 1 - kExtendedExponentBias
+			: static_cast<int>(exponent) - kExtendedExponentBias;
+	const int leadingBit = HighestSetBit(significand);
+	int resultExponent = unbiasedExponent - 63 + leadingBit;
+
+	if (resultExponent > 1023)
+	{
+		return std::bit_cast<double>(doubleSign | kDoubleInfinity);
+	}
+
+	if (resultExponent >= -1022)
+	{
+		const int shift = leadingBit - 52;
+		std::uint64_t roundedSignificand = shift >= 0
+				? RoundedRightShift(significand, shift)
+				: significand << -shift;
+
+		if (roundedSignificand == (UINT64_C(1) << 53))
+		{
+			roundedSignificand >>= 1;
+			resultExponent++;
+		}
+		if (resultExponent > 1023)
+		{
+			return std::bit_cast<double>(doubleSign | kDoubleInfinity);
+		}
+
+		const std::uint64_t encodedExponent =
+				static_cast<std::uint64_t>(resultExponent + 1023) << 52;
+		const std::uint64_t encodedFraction =
+				roundedSignificand & kDoubleFractionMask;
+		return std::bit_cast<double>(doubleSign | encodedExponent | encodedFraction);
+	}
+
+	// Binary64 subnormals are integer multiples of 2^-1074. Scale the
+	// binary80 significand into those units and round once at the boundary.
+	const int scaleInSubnormalUnits = unbiasedExponent + 1011;
+	const std::uint64_t subnormal =
+			ScaleToInteger(significand, scaleInSubnormalUnits);
+	if (subnormal >= (UINT64_C(1) << 52))
+	{
+		return std::bit_cast<double>(doubleSign | (UINT64_C(1) << 52));
+	}
+	return std::bit_cast<double>(doubleSign | subnormal);
 }

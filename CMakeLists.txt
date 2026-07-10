@@ -180,4 +180,8 @@ if(POMME_BUILD_TESTING)
 	add_executable(PommeFileTests tests/FileTests.cpp)
 	target_link_libraries(PommeFileTests PRIVATE Pomme)
 	add_test(NAME pomme_files COMMAND PommeFileTests)
+
+	add_executable(PommeIEEEExtendedTests tests/IEEEExtendedTests.cpp)
+	target_link_libraries(PommeIEEEExtendedTests PRIVATE Pomme)
+	add_test(NAME pomme_ieee_extended COMMAND PommeIEEEExtendedTests)
 endif()
