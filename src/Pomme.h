@@ -77,6 +77,10 @@ OSErr FSpCreate(const FSSpec *spec, OSType creator, OSType fileType,
 
 OSErr FSpDelete(const FSSpec *spec);
 
+// Atomically replace dest with source. Both files must be in the same directory.
+// On success, source no longer exists and dest contains its former contents.
+OSErr FSpAtomicReplace(const FSSpec *source, const FSSpec *dest);
+
 OSErr ResolveAlias(const FSSpec *spec, AliasHandle alias, FSSpec *target,
                    Boolean *wasChanged);
 

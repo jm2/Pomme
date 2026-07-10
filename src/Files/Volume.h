@@ -20,6 +20,8 @@ protected:
 public:
   virtual std::iostream &GetStream() = 0;
 
+  virtual OSErr Close() = 0;
+
   virtual ~ForkHandle() = default;
 };
 
@@ -48,6 +50,9 @@ public:
                           ScriptCode scriptTag) = 0;
 
   virtual OSErr FSpDelete(const FSSpec *spec) = 0;
+
+  virtual OSErr FSpAtomicReplace(const FSSpec *source,
+                                 const FSSpec *dest) = 0;
 
   virtual OSErr DirCreate(long parentDirID, const u8string &directoryName,
                           long *createdDirID) = 0;

@@ -41,6 +41,8 @@ namespace Pomme::Files
 
 		OSErr FSpDelete(const FSSpec* spec) override;
 
+		OSErr FSpAtomicReplace(const FSSpec* source, const FSSpec* dest) override;
+
 		OSErr DirCreate(long parentDirID, const u8string& directoryName, long* createdDirID) override;
 	};
 }

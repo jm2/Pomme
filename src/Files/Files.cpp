@@ -58,15 +58,17 @@ const FSSpec& Pomme::Files::GetSpec(short refNum)
 	return openFiles[refNum]->spec;
 }
 
-void Pomme::Files::CloseStream(short refNum)
+OSErr Pomme::Files::CloseStream(short refNum)
 {
 	if (!IsRefNumLegal(refNum))
 	{
 		throw std::runtime_error("illegal refNum");
 	}
+	OSErr result = openFiles[refNum]->Close();
 	openFiles[refNum].reset(nullptr);
 	openFiles.Dispose(refNum);
 	LOG << "Stream #" << refNum << " closed\n";
+	return result;
 }
 
 bool Pomme::Files::IsStreamOpen(short refNum)
@@ -166,9 +168,13 @@ OSErr FSOpen(const char* cName, short vRefNum, short* refNum)
 
 OSErr FindFolder(short vRefNum, OSType folderType, Boolean createFolder, short* foundVRefNum, long* foundDirID)
 {
+	if (!foundVRefNum || !foundDirID)
+	{
+		return paramErr;
+	}
 	if (vRefNum != kOnSystemDisk)
 	{
-		throw std::runtime_error("FindFolder only supports kOnSystemDisk");
+		return nsvErr;
 	}
 
 	fs::path path = "";
@@ -224,15 +230,40 @@ OSErr FindFolder(short vRefNum, OSType folderType, Boolean createFolder, short* 
 
 	path = path.lexically_normal();
 
-	bool exists = fs::exists(path);
+	std::error_code error;
+	fs::file_status folderStatus = fs::status(path, error);
+	if (folderStatus.type() != fs::file_type::not_found && error)
+	{
+		return ioErr;
+	}
 
-	if (exists && !fs::is_directory(path))
+	if (fs::exists(folderStatus) && !fs::is_directory(folderStatus))
 	{
 		return dupFNErr;
 	}
-	if (!exists && createFolder)
+	if (!fs::exists(folderStatus))
 	{
-		fs::create_directories(path);
+		if (!createFolder)
+		{
+			return fnfErr;
+		}
+
+		error.clear();
+		fs::create_directories(path, error);
+		if (error)
+		{
+			return ioErr;
+		}
+
+		folderStatus = fs::status(path, error);
+		if (folderStatus.type() != fs::file_type::not_found && error)
+		{
+			return ioErr;
+		}
+		if (!fs::is_directory(folderStatus))
+		{
+			return fs::exists(folderStatus) ? dupFNErr : fnfErr;
+		}
 	}
 
 	*foundVRefNum = 0;//GetVolumeID(path);
@@ -264,6 +295,20 @@ OSErr FSpDelete(const FSSpec* spec)
 {
 	return IsVolumeLegal(spec->vRefNum)
 		? volumes.at(spec->vRefNum)->FSpDelete(spec)
+		: (OSErr)nsvErr;
+}
+
+OSErr FSpAtomicReplace(const FSSpec* source, const FSSpec* dest)
+{
+	if (!source || !dest)
+		return paramErr;
+	if (source->vRefNum != dest->vRefNum)
+		return nsvErr;
+	if (source->parID != dest->parID)
+		return paramErr;
+
+	return IsVolumeLegal(source->vRefNum)
+		? volumes.at(source->vRefNum)->FSpAtomicReplace(source, dest)
 		: (OSErr)nsvErr;
 }
 
@@ -326,10 +371,12 @@ OSErr GetVol(char* outVolNameC, short* vRefNum)
 
 OSErr FSRead(short refNum, long* count, Ptr buffPtr)
 {
+	if (!count || (!buffPtr && *count != 0)) return paramErr;
 	if (*count < 0) return paramErr;
 	if (!IsRefNumLegal(refNum)) return rfNumErr;
 	if (!IsStreamOpen(refNum)) return fnOpnErr;
 	if (!IsStreamPermissionAllowed(refNum, fsRdPerm)) return ioErr;
+	if (*count == 0) return noErr;
 
 	auto& f = GetStream(refNum);
 	f.read(buffPtr, *count);
@@ -341,13 +388,20 @@ OSErr FSRead(short refNum, long* count, Ptr buffPtr)
 
 OSErr FSWrite(short refNum, long* count, Ptr buffPtr)
 {
+	if (!count || (!buffPtr && *count != 0)) return paramErr;
 	if (*count < 0) return paramErr;
 	if (!IsRefNumLegal(refNum)) return rfNumErr;
 	if (!IsStreamOpen(refNum)) return fnOpnErr;
 	if (!IsStreamPermissionAllowed(refNum, fsWrPerm)) return wrPermErr;
+	if (*count == 0) return noErr;
 
 	auto& f = GetStream(refNum);
 	f.write(buffPtr, *count);
+	if (!f.good())
+	{
+		*count = 0;
+		return ioErr;
+	}
 
 	return noErr;
 }
@@ -358,12 +412,13 @@ OSErr FSClose(short refNum)
 		return rfNumErr;
 	if (!IsStreamOpen(refNum))
 		return fnOpnErr;
-	CloseStream(refNum);
-	return noErr;
+
+	return CloseStream(refNum);
 }
 
 OSErr GetEOF(short refNum, long* logEOF)
 {
+	if (!logEOF) return paramErr;
 	if (!IsRefNumLegal(refNum)) return rfNumErr;
 	if (!IsStreamOpen(refNum)) return fnOpnErr;
 

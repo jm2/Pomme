@@ -8,6 +8,10 @@
 #include <fstream>
 #include <iostream>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #define LOG POMME_GENLOG(POMME_DEBUG_FILES, "HOST")
 
 using namespace Pomme;
@@ -32,6 +36,27 @@ public:
   virtual ~HostForkHandle() = default;
 
   virtual std::iostream &GetStream() override { return backingStream; }
+
+  virtual OSErr Close() override {
+    bool closeFailed =
+        backingStream.bad() ||
+        ((permission & fsWrPerm) && backingStream.fail() &&
+         !backingStream.eof());
+
+    // Sync the file buffer directly so a harmless eofbit/failbit left by a
+    // previous read doesn't suppress the flush or masquerade as a write error.
+    if ((permission & fsWrPerm) && backingStream.rdbuf()->pubsync() != 0)
+      closeFailed = true;
+
+    // close() reports its own failure via failbit. Clear pre-existing stream
+    // state first so read-side EOF doesn't obscure that result.
+    backingStream.clear();
+    backingStream.close();
+    if (backingStream.fail())
+      closeFailed = true;
+
+    return closeFailed ? ioErr : noErr;
+  }
 };
 
 HostVolume::HostVolume(short vRefNum) : Volume(vRefNum) {
@@ -43,7 +68,10 @@ HostVolume::HostVolume(short vRefNum) : Volume(vRefNum) {
 // Public utilities
 
 long HostVolume::GetDirectoryID(const fs::path &dirPath) {
-  if (fs::exists(dirPath) && !fs::is_directory(dirPath)) {
+  std::error_code error;
+  const fs::file_status directoryStatus = fs::status(dirPath, error);
+  if (!error && fs::exists(directoryStatus) &&
+      !fs::is_directory(directoryStatus)) {
     std::cerr << "Warning: GetDirectoryID should only be used on directories! "
               << dirPath << "\n";
   }
@@ -287,8 +315,13 @@ OSErr HostVolume::FSpCreate(const FSSpec *spec, OSType creator, OSType fileType,
   (void)fileType;
   (void)scriptTag;
 
-  std::ofstream df(ToPath(spec->parID, (char *)spec->cName));
+  std::ofstream df(ToPath(spec->parID, (char *)spec->cName),
+                   std::ios::binary | std::ios::trunc);
+  if (!df.is_open() || !df.good())
+    return ioErr;
   df.close();
+  if (df.fail())
+    return ioErr;
   // TODO: we could write an AppleDouble file to save the creator/filetype.
   return noErr;
 }
@@ -300,4 +333,40 @@ OSErr HostVolume::FSpDelete(const FSSpec *spec) {
     return noErr;
   else
     return fnfErr;
+}
+
+OSErr HostVolume::FSpAtomicReplace(const FSSpec *source, const FSSpec *dest) {
+  auto sourcePath = ToPath(source->parID, (char *)source->cName);
+  auto destPath = ToPath(dest->parID, (char *)dest->cName);
+
+  std::error_code error;
+  const fs::file_status sourceStatus = fs::status(sourcePath, error);
+  if (sourceStatus.type() == fs::file_type::not_found)
+    return fnfErr;
+  if (error) {
+    std::cerr << __func__ << " failed to inspect " << sourcePath << ": "
+              << error.message() << "\n";
+    return ioErr;
+  }
+  if (!fs::is_regular_file(sourceStatus))
+    return fnfErr;
+
+#ifdef _WIN32
+  // std::filesystem::rename uses MOVEFILE_COPY_ALLOWED in MSVC's standard
+  // library, which can silently turn a cross-volume move into a non-atomic
+  // copy/delete. FSpAtomicReplace must never permit that fallback.
+  if (!MoveFileExW(sourcePath.c_str(), destPath.c_str(),
+                   MOVEFILE_REPLACE_EXISTING)) {
+    error.assign(static_cast<int>(GetLastError()), std::system_category());
+  }
+#else
+  fs::rename(sourcePath, destPath, error);
+#endif
+  if (error) {
+    std::cerr << __func__ << " failed to replace " << destPath << " with "
+              << sourcePath << ": " << error.message() << "\n";
+    return ioErr;
+  }
+
+  return noErr;
 }

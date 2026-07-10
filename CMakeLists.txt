@@ -167,3 +167,17 @@ else()
 		-Wstrict-aliasing=2
 	)
 endif()
+
+set(_POMME_BUILD_TESTING_DEFAULT OFF)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+	include(CTest)
+	set(_POMME_BUILD_TESTING_DEFAULT ${BUILD_TESTING})
+endif()
+option(POMME_BUILD_TESTING "Build Pomme's validation tests" ${_POMME_BUILD_TESTING_DEFAULT})
+unset(_POMME_BUILD_TESTING_DEFAULT)
+
+if(POMME_BUILD_TESTING)
+	add_executable(PommeFileTests tests/FileTests.cpp)
+	target_link_libraries(PommeFileTests PRIVATE Pomme)
+	add_test(NAME pomme_files COMMAND PommeFileTests)
+endif()
