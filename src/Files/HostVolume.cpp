@@ -55,7 +55,7 @@ public:
     if (backingStream.fail())
       closeFailed = true;
 
-    return closeFailed ? ioErr : noErr;
+    return closeFailed ? (OSErr) ioErr : (OSErr) noErr;
   }
 };
 
@@ -275,7 +275,7 @@ OSErr HostVolume::FSMakeFSSpec(long dirID, const u8string &fileName,
 
   *spec = ToFSSpec(path);
 
-  return exists ? noErr : fnfErr;
+  return exists ? (OSErr) noErr : (OSErr) fnfErr;
 }
 
 OSErr HostVolume::DirCreate(long parentDirID, const u8string &directoryName,
